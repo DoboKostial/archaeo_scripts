@@ -165,9 +165,6 @@ def parse_detail(html: str, url: str, obec_id: int, debug=False):
     # coords from text (typically returns lat, lon)
     lat, lon = extract_coords_wgs84(clean_text(node.get_text(" ", strip=True)))
 
-    # POZOR: přeznačení sloupců dle tvého požadavku:
-    # - do wgs84_x uložíme LON
-    # - do wgs84_y uložíme LAT
     rec = {
         "obec_id": obec_id,
         "nazev": name,
@@ -177,8 +174,8 @@ def parse_detail(html: str, url: str, obec_id: int, debug=False):
         "duvod_zaniku": extract_facet_text(soup, "duv"),
         "obdobi_zaniku": extract_facet_text(soup, "obd"),
         "soucasny_stav": extract_facet_text(soup, "stv"),
-        "wgs84_x": lon,  # prohozené názvy
-        "wgs84_y": lat,  # prohozené názvy
+        "wgs84_x": lon,  # switched name
+        "wgs84_y": lat,  # switched names
         "pocet_obrazku": len(node.find_all("img")),
         "url": url,
     }
