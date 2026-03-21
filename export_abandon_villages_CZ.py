@@ -23,7 +23,7 @@ BASE_SITE = "https://www.zanikleobce.cz/"
 DETAIL_TMPL = "https://www.zanikleobce.cz/index.php?obec={id}"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) zanikleobce-export/3.2",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) zanikleobce-export/3.3",
     "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.7",
 }
 
@@ -65,6 +65,10 @@ def find_main_content_node(soup: BeautifulSoup):
     return soup.body or soup
 
 def extract_coords_wgs84(full_text: str):
+    """
+    Vrací (a,b) tak jak je to v textu nejčastěji: (lat, lon).
+    Neřešíme tady přeznačení X/Y – to uděláme až při ukládání do sloupců.
+    """
     t = full_text.replace(",", ".")
     m = re.search(
         r"\bX\b\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)\s*.*?\bY\b\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)",
@@ -78,10 +82,11 @@ def extract_coords_wgs84(full_text: str):
         nums = re.findall(r"([+-]?\d+(?:\.\d+)?)", t)
         for i in range(len(nums) - 1):
             a = float(nums[i]); b = float(nums[i + 1])
+            # typicky lat ~ 47-51.5, lon ~ 11-19.5
             if 47.0 <= a <= 51.5 and 11.0 <= b <= 19.5:
-                return str(a), str(b)
+                return str(a), str(b)  # lat, lon
             if 47.0 <= b <= 51.5 and 11.0 <= a <= 19.5:
-                return str(b), str(a)
+                return str(b), str(a)  # lat, lon
     return "", ""
 
 def extract_alt_names(node: BeautifulSoup) -> str:
@@ -157,6 +162,12 @@ def parse_detail(html: str, url: str, obec_id: int, debug=False):
 
     alt = extract_alt_names(node)
 
+    # coords from text (typically returns lat, lon)
+    lat, lon = extract_coords_wgs84(clean_text(node.get_text(" ", strip=True)))
+
+    # POZOR: přeznačení sloupců dle tvého požadavku:
+    # - do wgs84_x uložíme LON
+    # - do wgs84_y uložíme LAT
     rec = {
         "obec_id": obec_id,
         "nazev": name,
@@ -166,14 +177,11 @@ def parse_detail(html: str, url: str, obec_id: int, debug=False):
         "duvod_zaniku": extract_facet_text(soup, "duv"),
         "obdobi_zaniku": extract_facet_text(soup, "obd"),
         "soucasny_stav": extract_facet_text(soup, "stv"),
-        "wgs84_x": "",
-        "wgs84_y": "",
+        "wgs84_x": lon,  # prohozené názvy
+        "wgs84_y": lat,  # prohozené názvy
         "pocet_obrazku": len(node.find_all("img")),
         "url": url,
     }
-
-    full_text = clean_text(node.get_text(" ", strip=True))
-    rec["wgs84_x"], rec["wgs84_y"] = extract_coords_wgs84(full_text)
 
     if debug:
         print("[DEBUG]", {
@@ -184,8 +192,8 @@ def parse_detail(html: str, url: str, obec_id: int, debug=False):
             "duvod": rec["duvod_zaniku"],
             "obdobi": rec["obdobi_zaniku"],
             "stav": rec["soucasny_stav"],
-            "x": rec["wgs84_x"],
-            "y": rec["wgs84_y"],
+            "wgs84_x(lon)": rec["wgs84_x"],
+            "wgs84_y(lat)": rec["wgs84_y"],
             "img": rec["pocet_obrazku"],
         })
 
@@ -203,7 +211,6 @@ def load_existing_if_append(path: str, append: bool):
 def export_range(min_id: int, max_id: int, out_xlsx: str, sleep_s=0.8, debug=False, append=False):
     sess = session()
     records = []
-
     existing_df = load_existing_if_append(out_xlsx, append=append)
 
     for ob_id in range(min_id, max_id + 1):
