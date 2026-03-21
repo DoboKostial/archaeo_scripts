@@ -1,3 +1,14 @@
+#!/usr/bin/python
+# This script rips https://zanikleobce.cz and parse the content to excel sheet
+### USAGE:
+# required toggles: --out (name of file where to export)
+# optional toggles: --min-id , --max-id , --debug , --append , --sleep
+# 'python export_abandon_villages_CZ.py --min-id 1 --max-id 50 --debug --out test.xlsx' ---> exports first 50 records in debug mode and stores in test.xlsx
+# 'python export_abandon_villages_CZ.py -min-id 501 --max-id 1000 --sleep 1.0 --out zanikle_obce.xlsx --append' ---> exports 501-1000 record and appends it to file zanikle_obce. Waits 1 sec for every record to parse
+#
+# author: dobo@dobo.sk
+# 
+
 import re
 import time
 import argparse
@@ -12,7 +23,7 @@ BASE_SITE = "https://www.zanikleobce.cz/"
 DETAIL_TMPL = "https://www.zanikleobce.cz/index.php?obec={id}"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) zanikleobce-export/3.1",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) zanikleobce-export/3.2",
     "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.7",
 }
 
@@ -127,13 +138,13 @@ def is_probably_valid_obec_page(soup: BeautifulSoup, obec_id: int) -> bool:
     if extract_name_from_self_link(soup, obec_id):
         return True
     html = str(soup)
-    if re.search(r"menu=11&(?:typ|okr|duv|obd|stv)=", html, flags=re.IGNORECASE):
-        return True
-    return False
+    return bool(re.search(r"menu=11&(?:typ|okr|duv|obd|stv)=", html, flags=re.IGNORECASE))
 
-def parse_detail(html: str, url: str, obec_id: int):
+def parse_detail(html: str, url: str, obec_id: int, debug=False):
     soup = BeautifulSoup(html, "html.parser")
     if not is_probably_valid_obec_page(soup, obec_id):
+        if debug:
+            print(f"[SKIP] obec={obec_id} (not a valid obec page)")
         return None
 
     node = find_main_content_node(soup)
@@ -146,44 +157,48 @@ def parse_detail(html: str, url: str, obec_id: int):
 
     alt = extract_alt_names(node)
 
-    kategorie = extract_facet_text(soup, "typ")
-    okres = extract_facet_text(soup, "okr")
-    duvod = extract_facet_text(soup, "duv")
-    obdobi = extract_facet_text(soup, "obd")
-    stav = extract_facet_text(soup, "stv")
-
-    full_text = clean_text(node.get_text(" ", strip=True))
-    x, y = extract_coords_wgs84(full_text)
-
-    img_count = len(node.find_all("img"))
-
-    return {
+    rec = {
         "obec_id": obec_id,
         "nazev": name,
         "alternativni_nazvy": alt,
-        "kategorie": kategorie,
-        "okres": okres,
-        "duvod_zaniku": duvod,
-        "obdobi_zaniku": obdobi,
-        "soucasny_stav": stav,
-        "wgs84_x": x,
-        "wgs84_y": y,
-        "pocet_obrazku": img_count,
+        "kategorie": extract_facet_text(soup, "typ"),
+        "okres": extract_facet_text(soup, "okr"),
+        "duvod_zaniku": extract_facet_text(soup, "duv"),
+        "obdobi_zaniku": extract_facet_text(soup, "obd"),
+        "soucasny_stav": extract_facet_text(soup, "stv"),
+        "wgs84_x": "",
+        "wgs84_y": "",
+        "pocet_obrazku": len(node.find_all("img")),
         "url": url,
     }
 
-def load_existing_if_append(path: str, append: bool) -> pd.DataFrame | None:
-    if not append:
-        return None
-    if not os.path.exists(path):
+    full_text = clean_text(node.get_text(" ", strip=True))
+    rec["wgs84_x"], rec["wgs84_y"] = extract_coords_wgs84(full_text)
+
+    if debug:
+        print("[DEBUG]", {
+            "id": rec["obec_id"],
+            "nazev": rec["nazev"],
+            "kategorie": rec["kategorie"],
+            "okres": rec["okres"],
+            "duvod": rec["duvod_zaniku"],
+            "obdobi": rec["obdobi_zaniku"],
+            "stav": rec["soucasny_stav"],
+            "x": rec["wgs84_x"],
+            "y": rec["wgs84_y"],
+            "img": rec["pocet_obrazku"],
+        })
+
+    return rec
+
+def load_existing_if_append(path: str, append: bool):
+    if not append or not os.path.exists(path):
         return None
     try:
         df = pd.read_excel(path)
-        if "obec_id" in df.columns:
-            return df
+        return df if "obec_id" in df.columns else None
     except Exception:
         return None
-    return None
 
 def export_range(min_id: int, max_id: int, out_xlsx: str, sleep_s=0.8, debug=False, append=False):
     sess = session()
@@ -201,17 +216,9 @@ def export_range(min_id: int, max_id: int, out_xlsx: str, sleep_s=0.8, debug=Fal
             time.sleep(sleep_s)
             continue
 
-        rec = parse_detail(html, url=url, obec_id=ob_id)
-        if rec is None:
-            if debug:
-                print(f"[SKIP] obec={ob_id} (not a valid obec page)")
-            time.sleep(sleep_s)
-            continue
-
-        records.append(rec)
-
-        if ob_id % 50 == 0:
-            print(f"[INFO] processed {ob_id}/{max_id}, extracted batch {len(records)}")
+        rec = parse_detail(html, url=url, obec_id=ob_id, debug=debug)
+        if rec is not None:
+            records.append(rec)
 
         time.sleep(sleep_s)
 
