@@ -1,6 +1,7 @@
 import re
 import time
 import argparse
+import os
 from urllib.parse import urljoin, urlparse, parse_qs
 
 import requests
@@ -11,7 +12,7 @@ BASE_SITE = "https://www.zanikleobce.cz/"
 DETAIL_TMPL = "https://www.zanikleobce.cz/index.php?obec={id}"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) zanikleobce-export/3.0",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) zanikleobce-export/3.1",
     "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.7",
 }
 
@@ -130,13 +131,9 @@ def is_probably_valid_obec_page(soup: BeautifulSoup, obec_id: int) -> bool:
         return True
     return False
 
-def parse_detail(html: str, url: str, obec_id: int, debug=False, save_debug_html=False):
+def parse_detail(html: str, url: str, obec_id: int):
     soup = BeautifulSoup(html, "html.parser")
-
     if not is_probably_valid_obec_page(soup, obec_id):
-        if debug and save_debug_html:
-            with open(f"debug_obec_{obec_id}.html", "w", encoding="utf-8") as f:
-                f.write(html)
         return None
 
     node = find_main_content_node(soup)
@@ -160,7 +157,7 @@ def parse_detail(html: str, url: str, obec_id: int, debug=False, save_debug_html
 
     img_count = len(node.find_all("img"))
 
-    rec = {
+    return {
         "obec_id": obec_id,
         "nazev": name,
         "alternativni_nazvy": alt,
@@ -175,36 +172,36 @@ def parse_detail(html: str, url: str, obec_id: int, debug=False, save_debug_html
         "url": url,
     }
 
-    if debug:
-        print("[DEBUG]", {
-            "id": obec_id,
-            "nazev": rec["nazev"],
-            "okres": rec["okres"],
-            "kategorie": rec["kategorie"],
-            "duvod": rec["duvod_zaniku"],
-            "obdobi": rec["obdobi_zaniku"],
-            "stav": rec["soucasny_stav"],
-            "x": rec["wgs84_x"],
-            "y": rec["wgs84_y"],
-            "img": rec["pocet_obrazku"],
-        })
+def load_existing_if_append(path: str, append: bool) -> pd.DataFrame | None:
+    if not append:
+        return None
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_excel(path)
+        if "obec_id" in df.columns:
+            return df
+    except Exception:
+        return None
+    return None
 
-    return rec
-
-def export_range(max_id: int, out_xlsx: str, sleep_s=0.8, debug=False, save_debug_html=False):
+def export_range(min_id: int, max_id: int, out_xlsx: str, sleep_s=0.8, debug=False, append=False):
     sess = session()
     records = []
 
-    for ob_id in range(1, max_id + 1):
+    existing_df = load_existing_if_append(out_xlsx, append=append)
+
+    for ob_id in range(min_id, max_id + 1):
         url = DETAIL_TMPL.format(id=ob_id)
         html, status = fetch_html(sess, url, debug=debug)
 
         if html is None:
             if debug:
                 print(f"[SKIP] obec={ob_id} (HTTP {status})")
+            time.sleep(sleep_s)
             continue
 
-        rec = parse_detail(html, url=url, obec_id=ob_id, debug=debug, save_debug_html=save_debug_html)
+        rec = parse_detail(html, url=url, obec_id=ob_id)
         if rec is None:
             if debug:
                 print(f"[SKIP] obec={ob_id} (not a valid obec page)")
@@ -214,11 +211,18 @@ def export_range(max_id: int, out_xlsx: str, sleep_s=0.8, debug=False, save_debu
         records.append(rec)
 
         if ob_id % 50 == 0:
-            print(f"[INFO] processed {ob_id}/{max_id}, extracted {len(records)}")
+            print(f"[INFO] processed {ob_id}/{max_id}, extracted batch {len(records)}")
 
         time.sleep(sleep_s)
 
-    df = pd.DataFrame(records)
+    batch_df = pd.DataFrame(records)
+
+    if existing_df is not None and not existing_df.empty:
+        df = pd.concat([existing_df, batch_df], ignore_index=True)
+        df = df.drop_duplicates(subset=["obec_id"], keep="last")
+    else:
+        df = batch_df
+
     preferred = [
         "obec_id", "nazev", "alternativni_nazvy",
         "kategorie", "okres", "duvod_zaniku", "obdobi_zaniku", "soucasny_stav",
@@ -232,19 +236,24 @@ def export_range(max_id: int, out_xlsx: str, sleep_s=0.8, debug=False, save_debu
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--max-id", type=int, required=True)
+    ap.add_argument("--min-id", type=int, default=1, help="Start obec id (inclusive)")
+    ap.add_argument("--max-id", type=int, required=True, help="End obec id (inclusive)")
     ap.add_argument("--out", default="zanikle_obce_export.xlsx")
     ap.add_argument("--sleep", type=float, default=0.8)
     ap.add_argument("--debug", action="store_true")
-    ap.add_argument("--save-debug-html", action="store_true")
+    ap.add_argument("--append", action="store_true", help="Append to existing XLSX and dedupe by obec_id")
     args = ap.parse_args()
 
+    if args.min_id < 1 or args.max_id < args.min_id:
+        raise SystemExit("Invalid range: require 1 <= min-id <= max-id")
+
     export_range(
+        min_id=args.min_id,
         max_id=args.max_id,
         out_xlsx=args.out,
         sleep_s=args.sleep,
         debug=args.debug,
-        save_debug_html=args.save_debug_html,
+        append=args.append,
     )
 
 if __name__ == "__main__":
