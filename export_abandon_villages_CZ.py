@@ -1,5 +1,9 @@
 #!/usr/bin/python
 # This script rips https://zanikleobce.cz and parse the content to excel sheet
+#
+# It vital ho have following libraries installed: requests beautifulsoup4 pandas openpyxl
+# This routine could be followed by 'abandon_villages_demography.py'
+#
 ### USAGE:
 # required toggles: --out (name of file where to export)
 # optional toggles: --min-id , --max-id , --debug , --append , --sleep
@@ -23,8 +27,13 @@ BASE_SITE = "https://www.zanikleobce.cz/"
 DETAIL_TMPL = "https://www.zanikleobce.cz/index.php?obec={id}"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) zanikleobce-export/3.3",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) zanikleobce-export/3.4",
     "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.7",
+}
+
+BAD_NAME_TEXTS = {
+    "reagovat", "více", "home", "úvod", "databáze",
+    "deutsch", "english", "česky", "cesky",
 }
 
 def clean_text(s: str) -> str:
@@ -65,10 +74,7 @@ def find_main_content_node(soup: BeautifulSoup):
     return soup.body or soup
 
 def extract_coords_wgs84(full_text: str):
-    """
-    Vrací (a,b) tak jak je to v textu nejčastěji: (lat, lon).
-    Neřešíme tady přeznačení X/Y – to uděláme až při ukládání do sloupců.
-    """
+    # vrací (lat, lon)
     t = full_text.replace(",", ".")
     m = re.search(
         r"\bX\b\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)\s*.*?\bY\b\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)",
@@ -82,11 +88,10 @@ def extract_coords_wgs84(full_text: str):
         nums = re.findall(r"([+-]?\d+(?:\.\d+)?)", t)
         for i in range(len(nums) - 1):
             a = float(nums[i]); b = float(nums[i + 1])
-            # typicky lat ~ 47-51.5, lon ~ 11-19.5
             if 47.0 <= a <= 51.5 and 11.0 <= b <= 19.5:
                 return str(a), str(b)  # lat, lon
             if 47.0 <= b <= 51.5 and 11.0 <= a <= 19.5:
-                return str(b), str(a)  # lat, lon
+                return str(b), str(a)
     return "", ""
 
 def extract_alt_names(node: BeautifulSoup) -> str:
@@ -102,40 +107,56 @@ def extract_facet_text(soup: BeautifulSoup, facet_key: str) -> str:
         if f"{facet_key}=" not in href:
             continue
         txt = clean_text(a.get_text(" ", strip=True))
-        if txt and "přidat" not in txt.lower() and txt.lower() != "více":
-            if txt.lower() in {"deutsch", "english", "česky", "cesky"}:
-                continue
-            return txt
+        if not txt:
+            continue
+        low = txt.lower()
+        if "přidat" in low or low == "více" or low in BAD_NAME_TEXTS:
+            continue
+        return txt
     return ""
 
 def extract_name_from_self_link(soup: BeautifulSoup, obec_id: int) -> str:
+    """
+    Vezme jen odkazy, které jsou čistě na detail obce:
+      - obec=<id>
+      - a neobsahují jiné parametry (kom, akce, detail, menu, lang, ...)
+    Tím vyřadíme "Reagovat" (obec=<id>&kom=...) a podobné.
+    """
     cands = []
+
     for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        abs_url = urljoin(BASE_SITE, href)
-        qs = parse_qs(urlparse(abs_url).query)
+        href_raw = a["href"].strip()
+        abs_url = urljoin(BASE_SITE, href_raw)
+        parsed = urlparse(abs_url)
+        qs = parse_qs(parsed.query)
 
         ob = (qs.get("obec") or [None])[0]
         if ob != str(obec_id):
             continue
-        if "lang" in qs:
+
+        # allowed only clear "obec=<id>" without parameters
+        allowed_keys = {"obec"}
+        if set(qs.keys()) != allowed_keys:
             continue
 
         txt = clean_text(a.get_text(" ", strip=True))
         if not txt:
             continue
+
         low = txt.lower()
-        if low in {"více", "home", "úvod", "databáze", "deutsch", "english", "česky", "cesky"}:
+        if low in BAD_NAME_TEXTS:
             continue
         if "přidat" in low:
             continue
-        if len(txt) > 80:
+        if len(txt) > 120:
             continue
 
         cands.append(txt)
 
     if not cands:
         return ""
+
+    # vyber nejkratší
     cands.sort(key=len)
     return cands[0]
 
@@ -162,7 +183,6 @@ def parse_detail(html: str, url: str, obec_id: int, debug=False):
 
     alt = extract_alt_names(node)
 
-    # coords from text (typically returns lat, lon)
     lat, lon = extract_coords_wgs84(clean_text(node.get_text(" ", strip=True)))
 
     rec = {
@@ -174,8 +194,9 @@ def parse_detail(html: str, url: str, obec_id: int, debug=False):
         "duvod_zaniku": extract_facet_text(soup, "duv"),
         "obdobi_zaniku": extract_facet_text(soup, "obd"),
         "soucasny_stav": extract_facet_text(soup, "stv"),
-        "wgs84_x": lon,  # switched name
-        "wgs84_y": lat,  # switched names
+        # přeznačení sloupců: X=lon, Y=lat
+        "wgs84_x": lon,
+        "wgs84_y": lat,
         "pocet_obrazku": len(node.find_all("img")),
         "url": url,
     }
@@ -247,12 +268,12 @@ def export_range(min_id: int, max_id: int, out_xlsx: str, sleep_s=0.8, debug=Fal
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--min-id", type=int, default=1, help="Start obec id (inclusive)")
-    ap.add_argument("--max-id", type=int, required=True, help="End obec id (inclusive)")
+    ap.add_argument("--min-id", type=int, default=1)
+    ap.add_argument("--max-id", type=int, required=True)
     ap.add_argument("--out", default="zanikle_obce_export.xlsx")
     ap.add_argument("--sleep", type=float, default=0.8)
     ap.add_argument("--debug", action="store_true")
-    ap.add_argument("--append", action="store_true", help="Append to existing XLSX and dedupe by obec_id")
+    ap.add_argument("--append", action="store_true")
     args = ap.parse_args()
 
     if args.min_id < 1 or args.max_id < args.min_id:
